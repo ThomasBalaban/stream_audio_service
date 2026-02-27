@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
 Stream Audio Service — Entry Point
-====================================
-Captures desktop audio → OpenAI Realtime (Whisper VAD) → GPT-4o enrichment.
-Subscribes to Hub vision_context so the enricher always has visual context.
 
-WebSocket clients:  ws://localhost:8017
-Health check:       GET  http://localhost:8018/health
-Shutdown:           POST http://localhost:8018/shutdown
+Health check:    GET  http://localhost:8018/health
+List devices:    GET  http://localhost:8018/devices
+Set device:      POST http://localhost:8018/set-device  {"device_id": N}
+Shutdown:        POST http://localhost:8018/shutdown
 """
 
 import os
@@ -30,14 +28,23 @@ def _shutdown(*_):
     sys.exit(0)
 
 
+def _swap_device(device_id: int):
+    global _service
+    if _service:
+        _service.swap_device(device_id)
+
+
 def main():
     global _service
     _service = StreamAudioService()
 
-    http_control.start(shutdown_callback=_shutdown)
+    http_control.start(
+        shutdown_callback   = _shutdown,
+        set_device_callback = _swap_device,
+    )
 
     signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGINT,  _shutdown)
 
     _service.run()
 
