@@ -59,11 +59,11 @@ class _Handler(BaseHTTPRequestHandler):
 
         elif self.path == "/devices":
             try:
-                from config import DESKTOP_AUDIO_DEVICE_ID
+                import config as _config
                 devices = _list_input_devices()
                 self._json(200, {
                     "devices":           devices,
-                    "current_device_id": DESKTOP_AUDIO_DEVICE_ID,
+                    "current_device_id": _config.DESKTOP_AUDIO_DEVICE_ID,
                 })
             except Exception as e:
                 self._json(500, {"error": str(e)})
