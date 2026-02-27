@@ -2,20 +2,7 @@
 Configuration for the Stream Audio Service.
 Handles desktop audio capture → OpenAI Realtime transcription → GPT-4o enrichment.
 """
-import os
-import sys
-
-# ── Path bootstrap ────────────────────────────────────────────────────────────
-_THIS_DIR    = os.path.dirname(os.path.abspath(__file__))
-_PARENT_DIR  = os.path.dirname(_THIS_DIR)
-_DESKTOP_DIR = os.path.join(_PARENT_DIR, "desktop_mon_gemini")
-
-for _p in (_DESKTOP_DIR, _PARENT_DIR):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
-# ─────────────────────────────────────────────────────────────────────────────
-
-from api_keys import OPENAI_API_KEY  # noqa: E402
+from api_keys import OPENAI_API_KEY
 
 # Audio
 DESKTOP_AUDIO_DEVICE_ID = 4
