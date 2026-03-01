@@ -265,6 +265,7 @@ class StreamAudioService:
         self._emit_to_hub("audio_context", {
             "context":    enriched_text,
             "is_partial": False,
+            "timestamp":  time.time(),
             "metadata": {
                 "source":  "desktop",
                 "speaker": speaker,
@@ -297,6 +298,7 @@ class StreamAudioService:
         self._emit_to_hub("audio_context", {
             "context":    text,
             "is_partial": False,
+            "timestamp":  time.time(),
             "metadata":   {"source": "desktop", "id": tid},
         })
 
