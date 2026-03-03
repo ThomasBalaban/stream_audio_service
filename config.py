@@ -21,8 +21,26 @@ except ImportError as e:
     raise
 
 # Audio
-DESKTOP_AUDIO_DEVICE_ID = 4
-AUDIO_SAMPLE_RATE       = 16000
+AUDIO_SAMPLE_RATE      = 16000
+
+_PREFERRED_DEVICE_NAME = "Cam Link 4K"
+_FALLBACK_DEVICE_ID    = 4
+
+def _find_device_by_name(name: str) -> int | None:
+    try:
+        import sounddevice as sd
+        for i, dev in enumerate(sd.query_devices()):
+            if dev["max_input_channels"] > 0 and name.lower() in dev["name"].lower():
+                print(f"[config] ✅ Found '{name}' → device_id={i} ({dev['name']})", flush=True)
+                return i
+    except Exception as e:
+        print(f"[config] ⚠️  Device lookup failed: {e}", flush=True)
+    return None
+
+_detected = _find_device_by_name(_PREFERRED_DEVICE_NAME)
+if _detected is None:
+    print(f"[config] ⚠️  '{_PREFERRED_DEVICE_NAME}' not found — falling back to device_id={_FALLBACK_DEVICE_ID}", flush=True)
+DESKTOP_AUDIO_DEVICE_ID = _detected if _detected is not None else _FALLBACK_DEVICE_ID
 
 # OpenAI Realtime VAD
 VAD_THRESHOLD           = 0.35
