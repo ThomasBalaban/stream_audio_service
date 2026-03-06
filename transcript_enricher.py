@@ -156,7 +156,7 @@ TIMESTAMP: [{ts}]
 TASK: Analyze this audio segment and return a JSON object with exactly these fields:
 
 {{
-  "formatted_line": "<[timestamp] Speaker Name (tone/delivery): dialogue text>",
+  "formatted_line": "[timestamp] Speaker Name (tone/delivery): dialogue text",
   "atmosphere": {{
     "music": "<Describe the music if present — its emotional quality, genre feel, tempo, instrumentation — e.g. 'tense low strings building to a crescendo', 'lo-fi hip hop beats, warm and melancholic', 'silence'. Infer from context if not explicit. null if definitely no music.>",
     "sfx": ["<specific sound effect>", "..."],

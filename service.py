@@ -10,6 +10,7 @@ import uuid
 
 import socketio
 
+from audio_atmosphere_analyzer import AudioAtmosphereAnalyzer
 from audio_streamer import DesktopAudioStreamer
 from config import (
     DESKTOP_AUDIO_DEVICE_ID,
@@ -79,6 +80,20 @@ class StreamAudioService:
             log(traceback.format_exc())
             raise
 
+        # ── Audio atmosphere analyzer (GPT-4o Audio, non-speech) ─────────────
+        log("Initializing AudioAtmosphereAnalyzer …")
+        try:
+            self.atm_analyzer = AudioAtmosphereAnalyzer(
+                on_atmosphere = self._on_raw_atmosphere,
+                sample_rate   = self.streamer.target_rate,
+            )
+            self.streamer.set_atmosphere_callback(self.atm_analyzer.analyze)
+            log(f"✅ AudioAtmosphereAnalyzer ready (every {self.streamer.atmosphere_interval_s}s)")
+        except Exception as e:
+            log(f"❌ AudioAtmosphereAnalyzer init FAILED: {e}")
+            log(traceback.format_exc())
+            raise
+
         # ── Transcript enricher ───────────────────────────────────────────────
         self.enricher: TranscriptEnricher | None = None
         if ENABLE_ENRICHMENT:
@@ -86,7 +101,7 @@ class StreamAudioService:
             try:
                 self.enricher = TranscriptEnricher(
                     on_enriched_transcript = self._on_enriched_transcript,
-                    on_audio_atmosphere    = self._on_audio_atmosphere,
+                    on_audio_atmosphere    = self._on_enricher_atmosphere,
                 )
                 log("✅ TranscriptEnricher ready")
             except Exception as e:
@@ -102,7 +117,10 @@ class StreamAudioService:
 
     def run(self):
         self.hub_loop = asyncio.new_event_loop()
-        threading.Thread(target=self._hub_thread, args=(self.hub_loop,), daemon=True, name="StreamHub").start()
+        threading.Thread(
+            target=self._hub_thread, args=(self.hub_loop,),
+            daemon=True, name="StreamHub"
+        ).start()
         log("Hub thread started")
 
         self.ws_server.start()
@@ -111,6 +129,9 @@ class StreamAudioService:
         if self.enricher:
             self.enricher.start()
             log("Enricher started")
+
+        self.atm_analyzer.start()
+        log("AtmosphereAnalyzer started")
 
         self.streamer.start()
         log(f"DesktopAudioStreamer started — capturing device {DESKTOP_AUDIO_DEVICE_ID} …")
@@ -135,19 +156,19 @@ class StreamAudioService:
             f"enriched: {self._enriched_count}, "
             f"atmosphere: {self._atmosphere_count})"
         )
-        try:
-            self.streamer.stop()
-        except Exception as e:
-            log(f"Error stopping streamer: {e}")
-        if self.enricher:
+        for name, obj in [
+            ("streamer",     self.streamer),
+            ("atm_analyzer", self.atm_analyzer),
+            ("enricher",     self.enricher),
+            ("ws_server",    self.ws_server),
+        ]:
+            if obj is None:
+                continue
             try:
-                self.enricher.stop()
+                obj.stop()
             except Exception as e:
-                log(f"Error stopping enricher: {e}")
-        try:
-            self.ws_server.stop()
-        except Exception as e:
-            log(f"Error stopping WS server: {e}")
+                log(f"Error stopping {name}: {e}")
+
         if self.hub_loop:
             self.hub_loop.call_soon_threadsafe(self.hub_loop.stop)
         log("🛑 Stopped.")
@@ -224,7 +245,6 @@ class StreamAudioService:
         tid = str(uuid.uuid4())
         log(f"🎙️  WHISPER TRANSCRIPT #{self._whisper_count}: {repr(raw_text)}")
 
-        # Broadcast raw immediately
         try:
             self.ws_server.broadcast({
                 "type":      "transcript_raw",
@@ -234,7 +254,6 @@ class StreamAudioService:
                 "timestamp": time.time(),
             })
             self._ws_broadcast_count += 1
-            log(f"→ WS broadcast (raw) #{self._ws_broadcast_count}")
         except Exception as e:
             log(f"❌ WS BROADCAST ERROR (raw): {e}")
             log(traceback.format_exc())
@@ -255,19 +274,21 @@ class StreamAudioService:
         log(f"✨ ENRICHED TRANSCRIPT #{self._enriched_count}: {repr(enriched_text[:120])}")
 
         speaker = "Unknown"
-        match = re.search(r"\[\d+:\d+\]\s*(?:\[.*?\]\s*)?([^:(]+?)(?:\s*\([^)]+\))?:", enriched_text)
+        match = re.search(
+            r"\[\d+:\d+\]\s*(?:\[.*?\]\s*)?([^:(]+?)(?:\s*\([^)]+\))?:", enriched_text
+        )
         if match:
             speaker = match.group(1).strip()
         log(f"  ↳ Speaker detected: {repr(speaker)}")
 
         payload = {
-            "type":       "transcript_enriched",
-            "source":     "desktop",
-            "speaker":    speaker,
-            "text":       enriched_text,
-            "enriched":   True,
-            "id":         transcript_id,
-            "timestamp":  time.time(),
+            "type":      "transcript_enriched",
+            "source":    "desktop",
+            "speaker":   speaker,
+            "text":      enriched_text,
+            "enriched":  True,
+            "id":        transcript_id,
+            "timestamp": time.time(),
         }
         if atmosphere:
             payload["atmosphere"] = atmosphere
@@ -275,22 +296,20 @@ class StreamAudioService:
         try:
             self.ws_server.broadcast(payload)
             self._ws_broadcast_count += 1
-            log(f"→ WS broadcast (enriched) #{self._ws_broadcast_count}")
         except Exception as e:
             log(f"❌ WS BROADCAST ERROR (enriched): {e}")
             log(traceback.format_exc())
 
-        hub_metadata = {"source": "desktop", "speaker": speaker, "id": transcript_id}
+        hub_meta = {"source": "desktop", "speaker": speaker, "id": transcript_id}
         if atmosphere:
-            hub_metadata["atmosphere"] = atmosphere
+            hub_meta["atmosphere"] = atmosphere
 
         self._emit_to_hub("audio_context", {
             "context":    enriched_text,
             "is_partial": False,
             "timestamp":  time.time(),
-            "metadata":   hub_metadata,
+            "metadata":   hub_meta,
         })
-
         self._emit_to_hub("transcript_enriched", {
             "text":       enriched_text,
             "speaker":    speaker,
@@ -298,26 +317,45 @@ class StreamAudioService:
             "atmosphere": atmosphere or {},
         })
 
-    def _on_audio_atmosphere(self, atmosphere: dict, transcript_id: str | None = None):
+    def _on_enricher_atmosphere(self, atmosphere: dict, transcript_id: str | None = None):
+        """Atmosphere inferred from speech context by TranscriptEnricher."""
+        self._broadcast_atmosphere(atmosphere, transcript_id, source="enricher")
+
+    def _on_raw_atmosphere(self, atmosphere: dict):
         """
-        Fired whenever the enricher detects meaningful audio atmosphere.
-        Broadcasts as a standalone event so consumers can react to music/SFX
-        changes independently of transcript text.
+        Atmosphere detected directly from raw audio by AudioAtmosphereAnalyzer.
+        Fires regardless of speech — catches SFX, music, explosions, etc.
         """
+        self._broadcast_atmosphere(atmosphere, transcript_id=None, source="audio")
+
+        # Feed notable events back into the enricher so the next speech
+        # transcript gets annotated with what just happened sonically
+        notable = atmosphere.get("notable_events", [])
+        if notable and self.enricher:
+            ctx = "Recent audio events detected: " + ", ".join(notable)
+            self.enricher.update_visual_context(ctx)
+            log(f"  ↳ Notable events forwarded to enricher: {notable}")
+
+    def _broadcast_atmosphere(
+        self,
+        atmosphere: dict,
+        transcript_id: str | None,
+        source: str,
+    ):
         self._atmosphere_count += 1
         mood    = atmosphere.get("mood", "")
-        music   = atmosphere.get("music", "")
+        notable = atmosphere.get("notable_events", [])
         changed = atmosphere.get("music_changed", False)
 
         log(
-            f"🎵 ATMOSPHERE #{self._atmosphere_count} "
-            f"[changed={changed}] mood={repr(mood)} music={repr(music[:60])}"
+            f"🎵 ATMOSPHERE #{self._atmosphere_count} [{source}] "
+            f"mood={repr(mood)} notable={notable}"
         )
 
         try:
             self.ws_server.broadcast({
                 "type":       "audio_atmosphere",
-                "source":     "desktop",
+                "source":     source,
                 "atmosphere": atmosphere,
                 "id":         transcript_id,
                 "timestamp":  time.time(),
@@ -326,10 +364,11 @@ class StreamAudioService:
         except Exception as e:
             log(f"❌ WS BROADCAST ERROR (atmosphere): {e}")
 
-        # Only emit to hub when something meaningfully changed
-        if changed or self._atmosphere_count == 1:
+        # Only hit the hub for meaningful changes to keep traffic down
+        if notable or changed:
             self._emit_to_hub("audio_atmosphere", {
                 "atmosphere": atmosphere,
+                "source":     source,
                 "id":         transcript_id,
                 "timestamp":  time.time(),
             })
@@ -364,7 +403,6 @@ class StreamAudioService:
     # ── Device hot-swap ───────────────────────────────────────────────────────
 
     def swap_device(self, device_id: int):
-        """Stop the current streamer and restart it on a new device."""
         import config
         log(f"🔄 Device swap requested → device_id={device_id}")
 
@@ -377,12 +415,12 @@ class StreamAudioService:
         config.DESKTOP_AUDIO_DEVICE_ID = device_id
 
         try:
-            from audio_streamer import DesktopAudioStreamer
             self.streamer = DesktopAudioStreamer(
                 realtime_client = self.openai_client,
                 device_id       = device_id,
             )
             self.streamer.set_volume_callback(self._on_volume)
+            self.streamer.set_atmosphere_callback(self.atm_analyzer.analyze)
             self.streamer.start()
             log(f"✅ New streamer started on device {device_id}")
         except Exception as e:
