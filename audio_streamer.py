@@ -3,11 +3,6 @@ DesktopAudioStreamer
 ─────────────────────
 Captures desktop audio via sounddevice and streams PCM chunks to the
 OpenAI Realtime client. Server-side VAD handles speech segmentation.
-
-Also maintains a parallel rolling buffer that fires atmosphere_callback(pcm_bytes)
-every atmosphere_interval_s seconds — regardless of speech — so that music,
-SFX, and ambience can be analyzed independently via GPT-4o Audio.
-
 Fires volume_callback(level: float) for monitoring.
 """
 
@@ -35,18 +30,14 @@ class DesktopAudioStreamer:
         self.queue: queue.Queue = queue.Queue(maxsize=500)
         self.running            = False
 
-        self.volume_callback     = None
-        self.atmosphere_callback = None          # ← NEW: fires with raw PCM bytes
+        self.volume_callback = None
 
         # Tuning
         self.gain              = 1.5
         self.remove_dc         = True
-        self.db_threshold      = -50
+        self.db_threshold      = -50     # Only drop truly silent frames
         self.send_interval_s   = 1.2
-        self.min_send_samples  = None
-
-        # Atmosphere tap — fires every N seconds with accumulated 24kHz PCM16 bytes
-        self.atmosphere_interval_s = 3.0        # ← tune as needed
+        self.min_send_samples  = None    # Calculated after device query
 
         # Threads / loops
         self._process_thread: threading.Thread | None = None
@@ -57,10 +48,6 @@ class DesktopAudioStreamer:
 
     def set_volume_callback(self, cb):
         self.volume_callback = cb
-
-    def set_atmosphere_callback(self, cb):
-        """cb(pcm_bytes: bytes) — called every atmosphere_interval_s with 24kHz int16 PCM."""
-        self.atmosphere_callback = cb
 
     def start(self):
         self.running         = True
@@ -159,7 +146,7 @@ class DesktopAudioStreamer:
         print(f"🎧 [Streamer] Desktop audio: {device_name}")
         print(f"   Rate: {self.input_rate} Hz → {self.target_rate} Hz | Server VAD enabled")
 
-        time.sleep(2.0)
+        time.sleep(2.0)  # Let OpenAI connection establish
 
         chunk_samples = int(self.input_rate * 0.1)
         retry, max_retry = 0, 5
@@ -182,32 +169,20 @@ class DesktopAudioStreamer:
             dtype="int16", latency="low",
         ):
             print("✅ [Streamer] Desktop audio stream active")
-
-            audio_buf  = np.array([], dtype=np.float32)   # for Whisper/Realtime
-            atm_buf    = np.array([], dtype=np.float32)   # for atmosphere analyzer (24kHz)
+            audio_buf  = np.array([], dtype=np.float32)
             last_send  = time.time()
-            last_atm   = time.time()
-
-            # How many 24kHz samples we want per atmosphere chunk
-            atm_samples_needed = int(self.target_rate * self.atmosphere_interval_s)
 
             while self.running:
                 # Drain the capture queue
                 while not self.queue.empty():
                     try:
-                        data      = self.queue.get_nowait()
-                        chunk_f32 = data.flatten().astype(np.float32) / 32768.0
-                        audio_buf = np.concatenate([audio_buf, chunk_f32])
-
-                        # Resample immediately into the atmosphere buffer
-                        resampled = self._resample(chunk_f32, self.input_rate, self.target_rate)
-                        atm_buf   = np.concatenate([atm_buf, resampled])
+                        data       = self.queue.get_nowait()
+                        chunk_f32  = data.flatten().astype(np.float32) / 32768.0
+                        audio_buf  = np.concatenate([audio_buf, chunk_f32])
                     except queue.Empty:
                         break
 
                 now = time.time()
-
-                # ── Whisper/Realtime send (unchanged) ────────────────────────
                 if (now - last_send >= self.send_interval_s
                         and len(audio_buf) >= self.min_send_samples):
 
@@ -229,32 +204,9 @@ class DesktopAudioStreamer:
 
                     last_send = now
 
-                # ── Atmosphere tap (parallel, timer-based) ────────────────────
-                if (self.atmosphere_callback
-                        and now - last_atm >= self.atmosphere_interval_s
-                        and len(atm_buf) >= atm_samples_needed):
-
-                    chunk        = atm_buf[:atm_samples_needed].copy()
-                    atm_buf      = atm_buf[atm_samples_needed:]
-                    last_atm     = now
-
-                    pcm_bytes = (np.clip(chunk, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
-
-                    # Fire in a daemon thread so we don't block the audio loop
-                    threading.Thread(
-                        target=self.atmosphere_callback,
-                        args=(pcm_bytes,),
-                        daemon=True,
-                        name="AtmTap",
-                    ).start()
-
-                # Cap buffers to prevent drift
+                # Cap buffer at 5 seconds to prevent drift
                 max_buf = int(self.input_rate * 5)
                 if len(audio_buf) > max_buf:
-                    audio_buf = audio_buf[-max_buf:]
-
-                max_atm_buf = int(self.target_rate * (self.atmosphere_interval_s * 2))
-                if len(atm_buf) > max_atm_buf:
-                    atm_buf = atm_buf[-max_atm_buf:]
+                    audio_buf = audio_buf[-max_buf :]
 
                 time.sleep(0.02)
