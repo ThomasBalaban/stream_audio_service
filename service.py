@@ -37,6 +37,7 @@ class StreamAudioService:
         self._whisper_count      = 0
         self._enriched_count     = 0
         self._vision_ctx_count   = 0
+        self._atmosphere_count   = 0
 
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY not found in api_keys.py")
@@ -84,7 +85,8 @@ class StreamAudioService:
             log("Initializing TranscriptEnricher …")
             try:
                 self.enricher = TranscriptEnricher(
-                    on_enriched_transcript=self._on_enriched_transcript,
+                    on_enriched_transcript = self._on_enriched_transcript,
+                    on_audio_atmosphere    = self._on_audio_atmosphere,
                 )
                 log("✅ TranscriptEnricher ready")
             except Exception as e:
@@ -125,7 +127,14 @@ class StreamAudioService:
             if self._shutting_down:
                 return
             self._shutting_down = True
-        log(f"🛑 Shutting down (hub emits: {self._hub_emit_count}, WS: {self._ws_broadcast_count}, whisper: {self._whisper_count}, enriched: {self._enriched_count})")
+        log(
+            f"🛑 Shutting down ("
+            f"hub emits: {self._hub_emit_count}, "
+            f"WS: {self._ws_broadcast_count}, "
+            f"whisper: {self._whisper_count}, "
+            f"enriched: {self._enriched_count}, "
+            f"atmosphere: {self._atmosphere_count})"
+        )
         try:
             self.streamer.stop()
         except Exception as e:
@@ -236,7 +245,12 @@ class StreamAudioService:
         else:
             self._publish_transcript(raw_text, tid, enriched=False)
 
-    def _on_enriched_transcript(self, enriched_text: str, transcript_id: str | None = None):
+    def _on_enriched_transcript(
+        self,
+        enriched_text: str,
+        transcript_id: str | None = None,
+        atmosphere: dict | None = None,
+    ):
         self._enriched_count += 1
         log(f"✨ ENRICHED TRANSCRIPT #{self._enriched_count}: {repr(enriched_text[:120])}")
 
@@ -246,38 +260,79 @@ class StreamAudioService:
             speaker = match.group(1).strip()
         log(f"  ↳ Speaker detected: {repr(speaker)}")
 
+        payload = {
+            "type":       "transcript_enriched",
+            "source":     "desktop",
+            "speaker":    speaker,
+            "text":       enriched_text,
+            "enriched":   True,
+            "id":         transcript_id,
+            "timestamp":  time.time(),
+        }
+        if atmosphere:
+            payload["atmosphere"] = atmosphere
+
         try:
-            self.ws_server.broadcast({
-                "type":      "transcript_enriched",
-                "source":    "desktop",
-                "speaker":   speaker,
-                "text":      enriched_text,
-                "enriched":  True,
-                "id":        transcript_id,
-                "timestamp": time.time(),
-            })
+            self.ws_server.broadcast(payload)
             self._ws_broadcast_count += 1
             log(f"→ WS broadcast (enriched) #{self._ws_broadcast_count}")
         except Exception as e:
             log(f"❌ WS BROADCAST ERROR (enriched): {e}")
             log(traceback.format_exc())
 
+        hub_metadata = {"source": "desktop", "speaker": speaker, "id": transcript_id}
+        if atmosphere:
+            hub_metadata["atmosphere"] = atmosphere
+
         self._emit_to_hub("audio_context", {
             "context":    enriched_text,
             "is_partial": False,
             "timestamp":  time.time(),
-            "metadata": {
-                "source":  "desktop",
-                "speaker": speaker,
-                "id":      transcript_id,
-            },
+            "metadata":   hub_metadata,
         })
 
         self._emit_to_hub("transcript_enriched", {
-            "text":    enriched_text,
-            "speaker": speaker,
-            "id":      transcript_id,
+            "text":       enriched_text,
+            "speaker":    speaker,
+            "id":         transcript_id,
+            "atmosphere": atmosphere or {},
         })
+
+    def _on_audio_atmosphere(self, atmosphere: dict, transcript_id: str | None = None):
+        """
+        Fired whenever the enricher detects meaningful audio atmosphere.
+        Broadcasts as a standalone event so consumers can react to music/SFX
+        changes independently of transcript text.
+        """
+        self._atmosphere_count += 1
+        mood    = atmosphere.get("mood", "")
+        music   = atmosphere.get("music", "")
+        changed = atmosphere.get("music_changed", False)
+
+        log(
+            f"🎵 ATMOSPHERE #{self._atmosphere_count} "
+            f"[changed={changed}] mood={repr(mood)} music={repr(music[:60])}"
+        )
+
+        try:
+            self.ws_server.broadcast({
+                "type":       "audio_atmosphere",
+                "source":     "desktop",
+                "atmosphere": atmosphere,
+                "id":         transcript_id,
+                "timestamp":  time.time(),
+            })
+            self._ws_broadcast_count += 1
+        except Exception as e:
+            log(f"❌ WS BROADCAST ERROR (atmosphere): {e}")
+
+        # Only emit to hub when something meaningfully changed
+        if changed or self._atmosphere_count == 1:
+            self._emit_to_hub("audio_atmosphere", {
+                "atmosphere": atmosphere,
+                "id":         transcript_id,
+                "timestamp":  time.time(),
+            })
 
     def _publish_transcript(self, text: str, tid: str, enriched: bool):
         log(f"→ Publishing transcript (enriched={enriched}): {repr(text[:80])}")
@@ -319,7 +374,6 @@ class StreamAudioService:
         except Exception as e:
             log(f"  ↳ Error stopping streamer: {e}")
 
-        # Update in-memory config
         config.DESKTOP_AUDIO_DEVICE_ID = device_id
 
         try:
