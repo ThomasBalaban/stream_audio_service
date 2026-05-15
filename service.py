@@ -41,7 +41,7 @@ class StreamAudioService:
         self._atmosphere_count   = 0
 
         if not OPENAI_API_KEY:
-            raise RuntimeError("OPENAI_API_KEY not found in api_keys.py")
+            raise RuntimeError("OPENAI_API_KEY not set — see director_ui/secrets/openai.env")
         log("✅ OPENAI_API_KEY present")
 
         # ── WebSocket server ──────────────────────────────────────────────────

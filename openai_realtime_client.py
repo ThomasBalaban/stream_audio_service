@@ -29,7 +29,7 @@ class OpenAIRealtimeClient:
         self.loop          = None
         self._closing      = False
 
-        self.url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+        self.url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
 
         self.audio_accumulated_sec = 0.0
         self.last_transcript       = ""
@@ -40,7 +40,6 @@ class OpenAIRealtimeClient:
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "OpenAI-Beta":   "realtime=v1",
         }
         print("🔗 [OpenAI] Connecting to Realtime API …")
 
@@ -80,17 +79,22 @@ class OpenAIRealtimeClient:
         await self.ws.send(json.dumps({
             "type": "session.update",
             "session": {
-                "modalities":              ["text", "audio"],
-                "input_audio_format":      "pcm16",
-                "input_audio_transcription": {
-                    "model":    "whisper-1",
-                    "language": "en",
-                },
-                "turn_detection": {
-                    "type":                 "server_vad",
-                    "threshold":            VAD_THRESHOLD,
-                    "prefix_padding_ms":    VAD_PREFIX_PADDING_MS,
-                    "silence_duration_ms":  VAD_SILENCE_DURATION_MS,
+                "type": "realtime",
+                "output_modalities": ["text"],
+                "audio": {
+                    "input": {
+                        "format": {"type": "audio/pcm", "rate": 24000},
+                        "transcription": {
+                            "model":    "whisper-1",
+                            "language": "en",
+                        },
+                        "turn_detection": {
+                            "type":                "server_vad",
+                            "threshold":           VAD_THRESHOLD,
+                            "prefix_padding_ms":   VAD_PREFIX_PADDING_MS,
+                            "silence_duration_ms": VAD_SILENCE_DURATION_MS,
+                        },
+                    },
                 },
             },
         }))
